@@ -9,6 +9,7 @@ import ScheduleEditor from "@/components/ScheduleEditor";
 import { spamCheck, spamLevel } from "@/lib/spam";
 import BodyEditor, { type BodyEditorHandle } from "@/components/BodyEditor";
 import DateTimePicker from "@/components/DateTimePicker";
+import { useConfirm } from "@/components/useConfirm";
 
 type Sender = { id: string; label: string; email: string; from_name: string | null; is_default: boolean };
 type SampleRow = { name: string; company: string; email: string; vars: Record<string, string> };
@@ -113,11 +114,22 @@ export default function CampaignForm({
     return [];
   });
   const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const { confirm, ConfirmDialog } = useConfirm();
   const attachInputRef = useRef<HTMLInputElement | null>(null);
   const recipientFileInputRef = useRef<HTMLInputElement | null>(null);
   const MAX_ATTACHMENTS = 5;
+  // Vercel serverless functions hard-cap request bodies at 4.5MB regardless of
+  // app code, so this must stay below that (with headroom for multipart
+  // overhead) or the upload fails with a raw platform 413 before we ever see it.
+  const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
+  const MAX_RECIPIENT_FILE_BYTES = 4 * 1024 * 1024;
 
   const [saving, setSaving] = useState(false);
+  // Set once the campaign row is created in "new" mode. If a later step
+  // (recipient import, attachments, follow-ups) fails and the user retries,
+  // this lets onSubmit resume against the same row instead of POSTing a
+  // second campaign and leaving the first as an orphaned duplicate draft.
+  const [createdCampaignId, setCreatedCampaignId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const bodyEditorRef = useRef<BodyEditorHandle | null>(null);
   const stepEditorRefs = useRef<Record<number, BodyEditorHandle | null>>({});
@@ -244,14 +256,21 @@ export default function CampaignForm({
   function addPending(files: FileList | File[]) {
     const incoming = Array.from(files);
     setErr(null);
+
+    const tooBig = incoming.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
+    const sized = incoming.filter((f) => f.size <= MAX_ATTACHMENT_BYTES);
+    if (tooBig.length > 0) {
+      setErr(`${tooBig.map((f) => f.name).join(", ")} — over the 4MB-per-file limit, not added.`);
+    }
+
     const room = MAX_ATTACHMENTS - existingAttachments.length - pendingAttachments.length;
     if (room <= 0) {
       setErr(`At most ${MAX_ATTACHMENTS} attachments per campaign.`);
       return;
     }
-    const accepted = incoming.slice(0, room);
-    if (accepted.length < incoming.length) {
-      setErr(`Only added ${accepted.length}/${incoming.length} — cap is ${MAX_ATTACHMENTS}.`);
+    const accepted = sized.slice(0, room);
+    if (accepted.length < sized.length) {
+      setErr(`Only added ${accepted.length}/${sized.length} — cap is ${MAX_ATTACHMENTS}.`);
     }
     setPendingAttachments([...pendingAttachments, ...accepted]);
   }
@@ -262,7 +281,8 @@ export default function CampaignForm({
 
   async function removeExisting(path: string) {
     if (!initial?.id) return;
-    if (!confirm("Remove this attachment?")) return;
+    const ok = await confirm({ title: "Remove this attachment?", danger: true, confirmLabel: "Remove" });
+    if (!ok) return;
     setAttachmentBusy(true);
     try {
       const r = await fetch(`/api/campaigns/${initial.id}/attachment?path=${encodeURIComponent(path)}`, { method: "DELETE" });
@@ -355,14 +375,27 @@ export default function CampaignForm({
     try {
       let campaignId = initial?.id;
       if (mode === "new") {
-        const res = await fetch("/api/campaigns", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) throw new Error(await errMsg(res));
-        const { campaign } = await res.json();
-        campaignId = campaign.id;
+        if (createdCampaignId) {
+          // A prior attempt already created the row — resume against it
+          // instead of creating a second one.
+          campaignId = createdCampaignId;
+          const res = await fetch(`/api/campaigns/${campaignId}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) throw new Error(await errMsg(res));
+        } else {
+          const res = await fetch("/api/campaigns", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) throw new Error(await errMsg(res));
+          const { campaign } = await res.json();
+          campaignId = campaign.id;
+          setCreatedCampaignId(campaign.id);
+        }
 
         // import recipients
         let upRes: Response;
@@ -435,7 +468,7 @@ export default function CampaignForm({
     ? { ...currentSample.vars, Name: currentSample.name, Company: currentSample.company }
     : { Name: "John", Company: "Acme Inc" };
   const previewHtml = useMemo(
-    () => toHtml(render(template, previewVars)),
+    () => toHtml(render(template, previewVars, { escapeForHtml: true })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [template, JSON.stringify(previewVars)]
   );
@@ -540,7 +573,16 @@ export default function CampaignForm({
                     type="file"
                     accept=".xlsx,.xls,.csv"
                     className="hidden"
-                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0] ?? null;
+                      if (f && f.size > MAX_RECIPIENT_FILE_BYTES) {
+                        setErr(`${f.name} is ${(f.size / 1_000_000).toFixed(1)}MB — max 4MB for recipient files.`);
+                        e.target.value = "";
+                        return;
+                      }
+                      setErr(null);
+                      setFile(f);
+                    }}
                   />
                   <button
                     type="button"
@@ -935,7 +977,7 @@ export default function CampaignForm({
                   <div className="text-ink font-medium">
                     {existingAttachments.length + pendingAttachments.length === 0 ? "Attach files" : "Add another file"}
                   </div>
-                  <div className="text-[11px] text-ink-500">PDF, DOC, DOCX, ZIP · max 20MB each · up to {MAX_ATTACHMENTS} files</div>
+                  <div className="text-[11px] text-ink-500">PDF, DOC, DOCX, ZIP · max 4MB each · up to {MAX_ATTACHMENTS} files</div>
                 </div>
               </button>
             )}
@@ -1022,6 +1064,7 @@ export default function CampaignForm({
           </div>
         </div>
       )}
+      {ConfirmDialog}
     </div>
   );
 }

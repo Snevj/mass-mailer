@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import DOMPurify from "dompurify";
 
 export type ReplyItem = {
   id: string;
@@ -16,14 +17,12 @@ export type ReplyItem = {
 };
 
 function sanitizeHtml(html: string): string {
-  // Quick-and-dirty sanitizer: strip <script>, <style>, on*= handlers, and javascript: URLs.
-  // Anything more sophisticated would need DOMPurify; for our own-inbox replies this is fine.
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/\son\w+="[^"]*"/gi, "")
-    .replace(/\son\w+='[^']*'/gi, "")
-    .replace(/javascript:/gi, "");
+  // Reply bodies come from arbitrary external senders (cold-outreach replies),
+  // not a trusted inbox, so this needs a real sanitizer rather than a regex.
+  return DOMPurify.sanitize(html, {
+    FORBID_TAGS: ["iframe", "object", "embed", "form", "input", "svg", "math"],
+    FORBID_ATTR: ["srcdoc"],
+  });
 }
 
 export default function ReplyDrawer({

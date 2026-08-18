@@ -11,6 +11,7 @@ const NAV = [
   { href: "/", label: "Campaigns", icon: CampaignIcon },
   { href: "/replies", label: "Replies", icon: ReplyIcon },
   { href: "/senders", label: "Senders", icon: MailIcon },
+  { href: "/unsubscribes", label: "Unsubscribes", icon: UnsubscribeIcon },
 ];
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
@@ -155,6 +156,14 @@ function MailIcon() {
     <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="9" />
       <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+function UnsubscribeIcon() {
+  return (
+    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M22 2L2 22M21 5H9a2 2 0 00-2 2v10M3 19V7a2 2 0 012-2" />
     </svg>
   );
 }

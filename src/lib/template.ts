@@ -3,7 +3,21 @@ import { marked } from "marked";
 const MD_LINK = /\[([^\]]+)\]\(([^)]+)\)/g;
 const TAG = /\{\{\s*([^}]+?)\s*\}\}/g;
 
-export function render(tpl: string, vars: Record<string, string>) {
+// Recipient values come from an uploaded CSV/sheet, not the campaign author's
+// own template — escape them before they're substituted into markdown source
+// so a stray "<" in someone's name/company can't be parsed as an HTML tag.
+function escapeHtml(v: string) {
+  return String(v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// escapeForHtml: true when the result feeds toHtml() (markdown -> HTML), so a
+// merge tag can't inject markup. Leave false for the plain-text branch, where
+// escaping would show literal "&amp;" instead of "&" to the recipient.
+export function render(tpl: string, vars: Record<string, string>, opts?: { escapeForHtml?: boolean }) {
   const resolved: Record<string, string> = {
     ...vars,
     Name: vars.Name ?? vars["First Name"] ?? vars.FirstName ?? "",
@@ -12,7 +26,10 @@ export function render(tpl: string, vars: Record<string, string>) {
   return tpl.replace(TAG, (_m, key) => {
     const k = String(key).trim();
     const v = resolved[k];
-    if (Object.prototype.hasOwnProperty.call(resolved, k)) return v ?? "";
+    if (Object.prototype.hasOwnProperty.call(resolved, k)) {
+      const out = v ?? "";
+      return opts?.escapeForHtml ? escapeHtml(out) : out;
+    }
     return `{{${k}}}`;
   });
 }

@@ -20,7 +20,16 @@ export default function LoginPage() {
       body: JSON.stringify({ password }),
     });
     setLoading(false);
-    if (!res.ok) { setErr("Wrong password."); return; }
+    if (!res.ok) {
+      if (res.status === 429) {
+        const d = await res.json().catch(() => ({}));
+        const mins = Math.ceil((d.retry_after_seconds ?? 0) / 60);
+        setErr(`Too many attempts. Try again in ${mins} minute${mins === 1 ? "" : "s"}.`);
+      } else {
+        setErr("Wrong password.");
+      }
+      return;
+    }
     const next = new URLSearchParams(window.location.search).get("next") || "/";
     router.push(next);
     router.refresh();

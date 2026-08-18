@@ -5,7 +5,10 @@ import { getSession } from "@/lib/auth";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const MAX_BYTES = 20 * 1024 * 1024; // 20MB per file
+// Vercel serverless functions hard-cap request bodies at 4.5MB regardless of
+// app code — anything higher here would fail with a raw platform 413 before
+// this handler ever runs, so this stays under that with headroom.
+const MAX_BYTES = 4 * 1024 * 1024; // 4MB per file
 const MAX_FILES = 5;
 
 async function auth() {
@@ -22,7 +25,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (!(file instanceof File)) return NextResponse.json({ error: "no_file" }, { status: 400 });
   if (file.size > MAX_BYTES) {
     return NextResponse.json(
-      { error: `File too large (${(file.size / 1_000_000).toFixed(1)}MB). Max 20MB per file.` },
+      { error: `File too large (${(file.size / 1_000_000).toFixed(1)}MB). Max 4MB per file.` },
       { status: 400 }
     );
   }

@@ -7,6 +7,7 @@ import { render, toHtml } from "@/lib/template";
 import type { Schedule } from "@/lib/supabase";
 import AppShell from "@/components/AppShell";
 import ActivityDrawer, { type ActivityRecipient } from "@/components/ActivityDrawer";
+import { useConfirm } from "@/components/useConfirm";
 
 type Sender = { id: string; label: string; email: string; from_name: string | null; is_default: boolean };
 type FollowUpStep = { step_number: number; delay_days: number; subject: string | null; template: string };
@@ -89,6 +90,9 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
   const [activity, setActivity] = useState<{ recipients: ActivityRecipient[]; links: { url: string; total_clicks: number; unique_clickers: number }[] } | null>(null);
   const [activeRecipient, setActiveRecipient] = useState<ActivityRecipient | null>(null);
   const [sortByScore, setSortByScore] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [validateResult, setValidateResult] = useState<string | null>(null);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   async function load() {
     const r = await fetch(`/api/campaigns/${id}`, { cache: "no-store" });
@@ -117,10 +121,18 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
     loadStats();
     loadActivity();
     fetch("/api/senders", { cache: "no-store" }).then((r) => r.json()).then((d) => setSenders(d.senders ?? []));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // Only poll while the campaign is actively sending — a done/draft/paused
+  // campaign's numbers don't change on their own, so there's no reason to
+  // keep re-fetching every 10s and burning Supabase read quota on it.
+  useEffect(() => {
+    if (campaign?.status !== "running") return;
     const t = setInterval(() => { load(); loadStats(); loadActivity(); }, 10_000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, campaign?.status]);
 
   async function patch(payload: Partial<Campaign>) {
     const r = await fetch(`/api/campaigns/${id}`, {
@@ -132,16 +144,52 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
   }
 
   async function destroy() {
-    if (!confirm("Delete this campaign and all its recipients? This cannot be undone.")) return;
+    if (!campaign) return;
+    const ok = await confirm({
+      title: "Delete this campaign?",
+      description: `This permanently deletes "${campaign.name}" and all ${total} of its recipients. This cannot be undone.`,
+      danger: true,
+      confirmLabel: "Delete campaign",
+      requireText: campaign.name,
+    });
+    if (!ok) return;
     const r = await fetch(`/api/campaigns/${id}`, { method: "DELETE" });
     if (r.ok) router.push("/");
+    else setErr("Failed to delete campaign.");
   }
 
   async function duplicate() {
+    setErr(null);
     const r = await fetch(`/api/campaigns/${id}/duplicate`, { method: "POST" });
-    if (!r.ok) { alert("Failed to duplicate"); return; }
+    if (!r.ok) { setErr("Failed to duplicate."); return; }
     const { campaign: dup } = await r.json();
     router.push(`/campaigns/${dup.id}/edit`);
+  }
+
+  async function clearAllRecipients() {
+    const ok = await confirm({
+      title: "Remove all recipients?",
+      description: `This removes all ${total} recipients from this campaign, including their send/reply history. The campaign itself is kept. This cannot be undone.`,
+      danger: true,
+      confirmLabel: "Remove all",
+    });
+    if (!ok) return;
+    const r = await fetch(`/api/campaigns/${id}/recipients`, { method: "DELETE" });
+    if (r.ok) load();
+    else setErr("Failed to remove recipients.");
+  }
+
+  async function deleteRecipient(r: Recipient) {
+    const ok = await confirm({
+      title: "Remove this recipient?",
+      description: `${r.name || r.email} will be removed from this campaign, including their send/reply history.`,
+      danger: true,
+      confirmLabel: "Remove",
+    });
+    if (!ok) return;
+    const res = await fetch(`/api/campaigns/${id}/recipients/${r.id}`, { method: "DELETE" });
+    if (res.ok) load();
+    else setErr("Failed to remove recipient.");
   }
 
   async function archive() {
@@ -156,11 +204,14 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
   const [validating, setValidating] = useState(false);
   async function validateEmails() {
     setValidating(true);
+    setErr(null);
     const r = await fetch(`/api/campaigns/${id}/validate`, { method: "POST" });
     setValidating(false);
-    if (!r.ok) { alert("Validation failed"); return; }
+    if (!r.ok) { setErr("Validation failed."); return; }
     const d = await r.json();
-    alert(`Checked ${d.checked}, ${d.invalid} invalid${d.invalid > 0 ? ` (${d.invalid_emails.slice(0, 5).join(", ")}${d.invalid > 5 ? "…" : ""})` : ""}.`);
+    setValidateResult(
+      `Checked ${d.checked}, ${d.invalid} invalid${d.invalid > 0 ? ` (${d.invalid_emails.slice(0, 5).join(", ")}${d.invalid > 5 ? "…" : ""})` : ""}.`
+    );
     load();
   }
 
@@ -196,7 +247,7 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
   const previewVars: Record<string, string> = previewRecipient
     ? { ...previewRecipient.vars, Name: previewRecipient.name, Company: previewRecipient.company }
     : { Name: "John", Company: "Acme Inc" };
-  const previewHtml = toHtml(render(campaign.template, previewVars));
+  const previewHtml = toHtml(render(campaign.template, previewVars, { escapeForHtml: true }));
 
   return (
     <AppShell>
@@ -226,6 +277,19 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
           <button className="btn-quiet text-red-600" onClick={destroy}>Delete</button>
         </div>
       </header>
+
+      {err && (
+        <div className="flex items-center justify-between gap-3 bg-red-50 text-red-700 text-[13px] px-4 py-2.5 mt-4 rounded-md">
+          <span>{err}</span>
+          <button onClick={() => setErr(null)} className="btn-quiet text-[12px] shrink-0">Dismiss</button>
+        </div>
+      )}
+      {validateResult && (
+        <div className="flex items-center justify-between gap-3 bg-surface border border-ink-200 text-ink-700 text-[13px] px-4 py-2.5 mt-4 rounded-md">
+          <span>{validateResult}</span>
+          <button onClick={() => setValidateResult(null)} className="btn-quiet text-[12px] shrink-0">Dismiss</button>
+        </div>
+      )}
 
       {/* big stats row */}
       <section className="grid grid-cols-2 md:grid-cols-4 gap-0 border-b border-ink-200 mt-0">
@@ -406,6 +470,15 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
             <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
               <h2 className="text-[15px] font-semibold">Recipients <span className="text-ink-400 font-normal">({total})</span></h2>
               <div className="flex items-center gap-3">
+                {total > 0 && (
+                  <button
+                    type="button"
+                    onClick={clearAllRecipients}
+                    className="text-[12px] text-red-600 hover:underline"
+                  >
+                    Remove all
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setSortByScore(!sortByScore)}
@@ -434,13 +507,14 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
 
             <div className="sheet overflow-hidden">
               {/* desktop header */}
-              <div className="hidden md:grid grid-cols-[40px,1.2fr,1fr,1.4fr,auto,auto] gap-4 px-4 py-2.5 border-b border-ink-200 text-[12px] font-medium text-ink-500">
+              <div className="hidden md:grid grid-cols-[40px,1.2fr,1fr,1.4fr,auto,auto,28px] gap-4 px-4 py-2.5 border-b border-ink-200 text-[12px] font-medium text-ink-500">
                 <span>#</span>
                 <span>Name</span>
                 <span>Company</span>
                 <span>Email</span>
                 <span>Status</span>
                 <span className="text-right">When</span>
+                <span />
               </div>
               {filtered.length === 0 && (
                 <div className="p-8 text-center text-[13px] text-ink-500">No recipients match this filter.</div>
@@ -453,10 +527,12 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
                 const act = activityById.get(r.id);
                 const engage = act && (act.opens > 0 || act.clicks > 0 || act.replied);
                 return (
-                  <button
+                  <div
                     key={r.id}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => act && setActiveRecipient(act)}
+                    onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && act) setActiveRecipient(act); }}
                     className="w-full text-left border-b border-ink-100 last:border-b-0 hover:bg-hover transition-colors cursor-pointer"
                   >
                     {/* mobile */}
@@ -470,7 +546,17 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
                           <div className="text-[12px] text-ink-600 truncate mt-0.5">{r.company}</div>
                           <div className="font-mono text-[11px] text-ink-500 truncate mt-0.5">{r.email}</div>
                         </div>
-                        <span className={`${STATUS_CLASS[r.status]} shrink-0`}>{r.status}</span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className={STATUS_CLASS[r.status]}>{r.status}</span>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); deleteRecipient(r); }}
+                            className="text-ink-400 hover:text-red-600 p-1 -m-1"
+                            aria-label={`Remove ${r.name || r.email}`}
+                          >
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0l-1 14a2 2 0 01-2 2H7a2 2 0 01-2-2L4 6h16z" /></svg>
+                          </button>
+                        </div>
                       </div>
                       <div className="flex items-center justify-between mt-2 text-[11px] text-ink-500">
                         <span>{when !== null ? when : r.error && <span className="text-red-600">{r.error}</span>}</span>
@@ -478,7 +564,7 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
                       </div>
                     </div>
                     {/* desktop */}
-                    <div className="hidden md:grid grid-cols-[40px,1.2fr,1fr,1.4fr,auto,auto] gap-4 items-center px-4 py-2.5 text-[13px]">
+                    <div className="hidden md:grid grid-cols-[40px,1.2fr,1fr,1.4fr,auto,auto,28px] gap-4 items-center px-4 py-2.5 text-[13px]">
                       <span className="font-mono text-ink-400">{idx}</span>
                       <div className="flex items-center gap-2 min-w-0">
                         <span className="font-medium truncate">{r.name}</span>
@@ -490,8 +576,16 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
                       <span className="text-[11px] text-ink-500 text-right">
                         {when !== null ? when : r.error && <span className="text-red-600 truncate block max-w-[160px]" title={r.error}>{r.error}</span>}
                       </span>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); deleteRecipient(r); }}
+                        className="text-ink-400 hover:text-red-600 p-1 -m-1 justify-self-end"
+                        aria-label={`Remove ${r.name || r.email}`}
+                      >
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0l-1 14a2 2 0 01-2 2H7a2 2 0 01-2-2L4 6h16z" /></svg>
+                      </button>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -559,6 +653,7 @@ export default function CampaignDetail({ params }: { params: Promise<{ id: strin
       </div>
 
       <ActivityDrawer recipient={activeRecipient} onClose={() => setActiveRecipient(null)} />
+      {ConfirmDialog}
     </div>
     </AppShell>
   );

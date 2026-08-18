@@ -46,23 +46,29 @@ export async function GET(req: Request) {
   const { data: campaigns, error } = await q;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  // Count per campaign. Using head:true count queries so we don't transfer
-  // rows — just totals. Parallelized so it's still one round-trip of latency.
-  const enriched = await Promise.all(
-    (campaigns ?? []).map(async (c) => {
-      const [total, sent, failed] = await Promise.all([
-        db.from("recipients").select("*", { count: "exact", head: true }).eq("campaign_id", c.id),
-        db.from("recipients").select("*", { count: "exact", head: true }).eq("campaign_id", c.id).in("status", ["sent", "replied"]),
-        db.from("recipients").select("*", { count: "exact", head: true }).eq("campaign_id", c.id).in("status", ["failed", "bounced"]),
-      ]);
-      return {
-        ...c,
-        total: total.count ?? 0,
-        sent: sent.count ?? 0,
-        failed: failed.count ?? 0,
-      };
-    })
-  );
+  // One query for every recipient's (campaign_id, status), aggregated here —
+  // instead of 3 count queries per campaign (3N round-trips to Supabase for
+  // N campaigns), this is a single round-trip regardless of campaign count.
+  const campaignIds = (campaigns ?? []).map((c) => c.id);
+  const counts = new Map<string, { total: number; sent: number; failed: number }>();
+  if (campaignIds.length > 0) {
+    const { data: statusRows } = await db
+      .from("recipients")
+      .select("campaign_id, status")
+      .in("campaign_id", campaignIds)
+      .range(0, 99999);
+    for (const r of statusRows ?? []) {
+      const c = counts.get(r.campaign_id) ?? { total: 0, sent: 0, failed: 0 };
+      c.total++;
+      if (r.status === "sent" || r.status === "replied") c.sent++;
+      if (r.status === "failed" || r.status === "bounced") c.failed++;
+      counts.set(r.campaign_id, c);
+    }
+  }
+  const enriched = (campaigns ?? []).map((c) => {
+    const cc = counts.get(c.id) ?? { total: 0, sent: 0, failed: 0 };
+    return { ...c, total: cc.total, sent: cc.sent, failed: cc.failed };
+  });
   return NextResponse.json({ campaigns: enriched });
 }
 

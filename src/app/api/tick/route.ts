@@ -64,6 +64,24 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // Map every sender to ALL campaigns that use it (any status), so the warmup
+  // cap reflects total volume from that mailbox, not just this one campaign.
+  // Without this, two campaigns sharing a sender could each independently hit
+  // daily_cap and double the sender's real send volume for the day.
+  const senderCampaignIds = new Map<string, string[]>();
+  if (senderIds.length > 0) {
+    const { data: sameSenderCampaigns } = await db
+      .from("campaigns")
+      .select("id, sender_id")
+      .in("sender_id", senderIds);
+    for (const sc of sameSenderCampaigns ?? []) {
+      if (!sc.sender_id) continue;
+      const arr = senderCampaignIds.get(sc.sender_id) ?? [];
+      arr.push(sc.id);
+      senderCampaignIds.set(sc.sender_id, arr);
+    }
+  }
+
   // Walk the sorted list — first campaign that passes ALL gates (window,
   // start_at, gap, daily cap incl. warmup) wins the tick.
   let campaign: typeof running[0] | null = null;
@@ -95,17 +113,28 @@ export async function GET(req: NextRequest) {
       .select("*", { count: "exact", head: true })
       .eq("campaign_id", c.id)
       .eq("day", today);
-    // Warmup-aware effective cap: min(campaign cap, today's warmup allowance).
+    if ((count ?? 0) >= c.daily_cap) {
+      skipped.push({ id: c.id, name: c.name, reason: "daily_cap_reached" });
+      continue;
+    }
+
+    // Warmup cap is enforced against the sender/mailbox's TOTAL sends today
+    // across every campaign using it, not just this campaign's count —
+    // otherwise two running campaigns on the same sender could each burn
+    // their own daily_cap and double the real volume out of that mailbox.
     const warmupInfo = c.sender_id ? warmupMap.get(c.sender_id) : undefined;
     const warmupCap = warmupInfo ? warmupCapForSender(warmupInfo, now) : Infinity;
-    const effectiveCap = Math.min(c.daily_cap, warmupCap);
-    if ((count ?? 0) >= effectiveCap) {
-      skipped.push({
-        id: c.id,
-        name: c.name,
-        reason: warmupCap < c.daily_cap ? "warmup_cap_reached" : "daily_cap_reached",
-      });
-      continue;
+    if (c.sender_id && Number.isFinite(warmupCap)) {
+      const sameSenderIds = senderCampaignIds.get(c.sender_id) ?? [c.id];
+      const { count: senderTodayCount } = await db
+        .from("send_log")
+        .select("*", { count: "exact", head: true })
+        .in("campaign_id", sameSenderIds)
+        .eq("day", today);
+      if ((senderTodayCount ?? 0) >= warmupCap) {
+        skipped.push({ id: c.id, name: c.name, reason: "warmup_cap_reached" });
+        continue;
+      }
     }
 
     campaign = c;
@@ -263,7 +292,8 @@ export async function GET(req: NextRequest) {
       ? `Re: ${rawSubject.replace(/^re:\s*/i, "")}`
       : rawSubject;
   const templateSrc = kind === "follow_up" ? step.template : campaign.template;
-  const body = render(templateSrc, vars);
+  const bodyHtml = render(templateSrc, vars, { escapeForHtml: true });
+  const bodyText = render(templateSrc, vars);
 
   const base = appUrl();
   const unsubUrl = campaign.unsubscribe_enabled ? `${base}/u/${signToken("u", recipient.id)}` : undefined;
@@ -274,8 +304,8 @@ export async function GET(req: NextRequest) {
     ? (url: string) => `${base}/api/t/c/${signToken("c", recipient.id)}?u=${encodeURIComponent(url)}`
     : undefined;
 
-  const html = toHtml(body, { wrapUrl, openPixelUrl, unsubscribeUrl: unsubUrl });
-  const text = toPlain(body, { unsubscribeUrl: unsubUrl });
+  const html = toHtml(bodyHtml, { wrapUrl, openPixelUrl, unsubscribeUrl: unsubUrl });
+  const text = toPlain(bodyText, { unsubscribeUrl: unsubUrl });
 
   // ---- attachments (up to 5 files per campaign) ----
   let attachments: { filename: string; content: Buffer }[] | undefined;

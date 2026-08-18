@@ -4,8 +4,12 @@ const ALGO = "aes-256-gcm";
 const PREFIX = "enc:v1:";
 
 function key() {
-  const s = process.env.SESSION_SECRET;
-  if (!s || s.length < 16) throw new Error("SESSION_SECRET too short for encryption");
+  // ENCRYPTION_KEY is preferred so rotating SESSION_SECRET (which also signs
+  // session cookies) doesn't silently make every stored sender credential
+  // undecryptable. Falls back to SESSION_SECRET for installs that predate
+  // this split.
+  const s = process.env.ENCRYPTION_KEY || process.env.SESSION_SECRET;
+  if (!s || s.length < 16) throw new Error("ENCRYPTION_KEY (or SESSION_SECRET) too short for encryption");
   return crypto.createHash("sha256").update(s).digest(); // 32 bytes
 }
 

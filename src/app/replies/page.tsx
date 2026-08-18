@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import AppShell from "@/components/AppShell";
 import ReplyDrawer, { type ReplyItem } from "@/components/ReplyDrawer";
+import { useConfirm } from "@/components/useConfirm";
 
 export default function RepliesPage() {
   const [replies, setReplies] = useState<ReplyItem[] | null>(null);
@@ -13,6 +14,8 @@ export default function RepliesPage() {
   const [query, setQuery] = useState("");
   const [replyCheckEnabled, setReplyCheckEnabled] = useState<boolean | null>(null);
   const [togglePending, setTogglePending] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   async function load() {
     const r = await fetch("/api/replies", { cache: "no-store" });
@@ -30,10 +33,16 @@ export default function RepliesPage() {
   async function toggleFlag() {
     if (replyCheckEnabled === null) return;
     const next = !replyCheckEnabled;
-    if (next && !confirm("Enable reply checking? This polls Gmail IMAP every 15 min and uses more Vercel resources. You can turn it off again anytime.")) {
-      return;
+    if (next) {
+      const ok = await confirm({
+        title: "Enable reply checking?",
+        description: "This polls Gmail IMAP every 15 min and uses more Vercel resources. You can turn it off again anytime.",
+        confirmLabel: "Enable",
+      });
+      if (!ok) return;
     }
     setTogglePending(true);
+    setErr(null);
     try {
       const r = await fetch("/api/settings/reply-check", {
         method: "POST",
@@ -41,7 +50,7 @@ export default function RepliesPage() {
         body: JSON.stringify({ enabled: next }),
       });
       if (!r.ok) {
-        alert("Failed to update setting.");
+        setErr("Failed to update setting.");
         return;
       }
       const d = await r.json();
@@ -60,12 +69,19 @@ export default function RepliesPage() {
   }
 
   async function deleteReply(id: string) {
-    if (!confirm("Delete this reply? This only removes it from the list — the recipient stays marked as replied.")) return;
+    const ok = await confirm({
+      title: "Delete this reply?",
+      description: "This only removes it from the list — the recipient stays marked as replied.",
+      danger: true,
+      confirmLabel: "Delete",
+    });
+    if (!ok) return;
     setDeletingId(id);
+    setErr(null);
     try {
       const r = await fetch(`/api/replies/${id}`, { method: "DELETE" });
       if (!r.ok) {
-        alert("Failed to delete reply.");
+        setErr("Failed to delete reply.");
         return;
       }
       setReplies((prev) => (prev ? prev.filter((x) => x.id !== id) : prev));
@@ -117,6 +133,13 @@ export default function RepliesPage() {
             {running ? "Loading…" : "Reload"}
           </button>
         </div>
+
+        {err && (
+          <div className="flex items-center justify-between gap-3 bg-red-50 text-red-700 text-[13px] px-3 py-2 rounded-md mb-4">
+            <span>{err}</span>
+            <button onClick={() => setErr(null)} className="btn-quiet text-[12px] shrink-0">Dismiss</button>
+          </div>
+        )}
 
         {replyCheckEnabled !== null && (
           <div className={`mb-4 px-4 py-3 rounded-lg border flex items-center justify-between gap-4 ${replyCheckEnabled ? "border-ink-200 bg-paper" : "border-amber-300 bg-amber-50"}`}>
@@ -250,6 +273,7 @@ export default function RepliesPage() {
 
         <ReplyDrawer reply={active} onClose={() => setActive(null)} onSent={load} />
       </div>
+      {ConfirmDialog}
     </AppShell>
   );
 }

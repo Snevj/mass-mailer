@@ -11,12 +11,22 @@ async function auth() {
   return s.loggedIn === true;
 }
 
+// Vercel serverless functions hard-cap request bodies at 4.5MB regardless of
+// app code, so this must stay under that with headroom for multipart overhead.
+const MAX_FILE_BYTES = 4 * 1024 * 1024;
+
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   if (!(await auth())) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const { id } = await ctx.params;
   const form = await req.formData();
   const file = form.get("file");
   if (!(file instanceof File)) return NextResponse.json({ error: "no_file" }, { status: 400 });
+  if (file.size > MAX_FILE_BYTES) {
+    return NextResponse.json(
+      { error: `File too large (${(file.size / 1_000_000).toFixed(1)}MB). Max 4MB.` },
+      { status: 400 }
+    );
+  }
   const buf = await file.arrayBuffer();
 
   let parsed;

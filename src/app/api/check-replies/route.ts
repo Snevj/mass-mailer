@@ -15,6 +15,31 @@ function normalizeMsgId(v: string | null | undefined): string | null {
   return t.startsWith("<") ? t : `<${t.replace(/^[<\s]+|[>\s]+$/g, "")}>`;
 }
 
+const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+// Bounces (NDRs) come FROM mailer-daemon, not from the recipient, so they
+// can't be matched by from-address like a reply. The failed recipient's
+// address is embedded in the bounce body (DSN report / quoted headers) —
+// pull out email addresses there and match the first one that's a known
+// recipient, excluding the sender's own address (which also appears in
+// most bounce bodies as the original From).
+function extractBouncedRecipient(
+  bodyText: string | null,
+  byEmail: Map<string, { id: string; campaign_id: string; status: string }>,
+  senderEmail: string
+): { id: string; campaign_id: string; status: string } | undefined {
+  if (!bodyText) return undefined;
+  const found = bodyText.match(EMAIL_RE);
+  if (!found) return undefined;
+  for (const raw of found) {
+    const addr = raw.toLowerCase();
+    if (addr === senderEmail.toLowerCase()) continue;
+    const hit = byEmail.get(addr);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
 export async function GET(req: NextRequest) {
   if (!cronBearerOk(req.headers.get("authorization"))) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -51,6 +76,7 @@ export async function GET(req: NextRequest) {
     skipped_bounce: number;
     saved: number;
     marked_replied: number;
+    marked_bounced: number;
   }> = [];
 
   for (const s of senders) {
@@ -64,7 +90,7 @@ export async function GET(req: NextRequest) {
       results.push({
         sender: s.email, checked: 0,
         matched_by_thread: 0, matched_by_from: 0,
-        skipped_auto: 0, skipped_bounce: 0, saved: 0, marked_replied: -1,
+        skipped_auto: 0, skipped_bounce: 0, saved: 0, marked_replied: -1, marked_bounced: 0,
       });
       continue;
     }
@@ -72,7 +98,7 @@ export async function GET(req: NextRequest) {
       results.push({
         sender: s.email, checked: 0,
         matched_by_thread: 0, matched_by_from: 0,
-        skipped_auto: 0, skipped_bounce: 0, saved: 0, marked_replied: 0,
+        skipped_auto: 0, skipped_bounce: 0, saved: 0, marked_replied: 0, marked_bounced: 0,
       });
       continue;
     }
@@ -87,7 +113,7 @@ export async function GET(req: NextRequest) {
       results.push({
         sender: s.email, checked: messages.length,
         matched_by_thread: 0, matched_by_from: 0,
-        skipped_auto: 0, skipped_bounce: 0, saved: 0, marked_replied: 0,
+        skipped_auto: 0, skipped_bounce: 0, saved: 0, marked_replied: 0, marked_bounced: 0,
       });
       continue;
     }
@@ -121,13 +147,21 @@ export async function GET(req: NextRequest) {
     let skippedAuto = 0;
     let skippedBounce = 0;
     const repliedRecipientIds = new Set<string>();
+    const bouncedRecipientIds = new Set<string>();
 
     for (const msg of messages) {
-      // Skip bounces (mailer-daemon / DSNs) — those aren't from the recipient
-      // at all, so counting them as a "reply" is factually wrong. Everything
-      // else is kept, including auto-replies / OOO / vacation responders —
-      // the owner wants to see every inbound signal, not just "active" ones.
-      if (msg.is_bounce) { skippedBounce++; continue; }
+      // Bounces (mailer-daemon / DSNs) aren't a reply, but they DO mean the
+      // address is dead — find which recipient it was for and stop sending
+      // to them (mark bounced, cancel any pending follow-up), instead of
+      // just counting the bounce and moving on.
+      if (msg.is_bounce) {
+        skippedBounce++;
+        const hit = extractBouncedRecipient(msg.body_text, byEmail, s.email);
+        if (hit && hit.status !== "bounced" && hit.status !== "unsubscribed") {
+          bouncedRecipientIds.add(hit.id);
+        }
+        continue;
+      }
 
       // 1) Authoritative match: In-Reply-To / References contains one of our
       //    outbound Message-IDs. Guaranteed genuine reply to our campaign.
@@ -142,12 +176,15 @@ export async function GET(req: NextRequest) {
       }
       if (hit) matchedByThread++;
 
-      // 2) Fallback: from-address matches a recipient we sent to. Auto-replies
-      //    and bounces are already filtered above, so any remaining mail from
-      //    a recipient address is treated as a genuine reply. Not every email
-      //    client sets In-Reply-To/References reliably, and requiring threading
-      //    headers drops real replies from some webmail clients.
-      if (!hit) {
+      // 2) Fallback: from-address matches a recipient we sent to, AND the
+      //    message carries some threading header (even if it didn't match one
+      //    of ours above — some clients rewrite Message-IDs mid-thread). This
+      //    is what rules out unrelated mail from that address; without it,
+      //    literally any email from a past recipient — a new unrelated
+      //    thread, a forwarded newsletter, anything — would be misfiled as a
+      //    reply and silently kill that recipient's follow-ups.
+      const hasThreadingHeaders = !!msg.in_reply_to || msg.references.length > 0;
+      if (!hit && hasThreadingHeaders) {
         hit = byEmail.get(msg.from);
         if (hit) matchedByFrom++;
       }
@@ -188,6 +225,21 @@ export async function GET(req: NextRequest) {
       markedReplied = updated?.length ?? 0;
     }
 
+    let markedBounced = 0;
+    if (bouncedRecipientIds.size > 0) {
+      const { data: updated, error: upErr } = await db
+        .from("recipients")
+        .update({
+          status: "bounced",
+          next_follow_up_at: null,
+          error: "Bounced (delivery failed)",
+        })
+        .in("id", Array.from(bouncedRecipientIds))
+        .select("id");
+      if (upErr) console.error("[check-replies] bounce update failed:", upErr);
+      markedBounced = updated?.length ?? 0;
+    }
+
     results.push({
       sender: s.email,
       checked: messages.length,
@@ -197,6 +249,7 @@ export async function GET(req: NextRequest) {
       skipped_bounce: skippedBounce,
       saved: savedCount,
       marked_replied: markedReplied,
+      marked_bounced: markedBounced,
     });
   }
 

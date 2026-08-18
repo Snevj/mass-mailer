@@ -39,6 +39,8 @@ Hit every 5 minutes by `pg_cron`. Polls Gmail IMAP via `imapflow` + `mailparser`
 
 `cron_config` is a small key/value table read by the cron jobs for `app_url` and `cron_secret` — rotate those by `UPDATE`, not by reinstalling jobs.
 
+`login_attempts` backs per-IP login rate limiting (`src/app/api/auth/login/route.ts`). `unsubscribes` is manageable from the UI at `/unsubscribes` (`src/app/api/unsubscribes/route.ts`), not just via the one-click unsubscribe link.
+
 ### Auth
 
 `iron-session` cookie auth, single shared `APP_PASSWORD`. `src/lib/auth.ts` guards UI routes; cron routes use bearer tokens instead.
@@ -57,5 +59,5 @@ Every tracking pixel, click redirect, and unsubscribe link is built from `APP_UR
 
 - `src/lib/*` files are small and single-purpose (mostly < 100 lines). Prefer extending one of them over creating a new abstraction.
 - Path alias `@/` → `src/`.
-- Gmail app passwords are stored encrypted (AES-GCM, key derived from `SESSION_SECRET`); always go through `crypto.ts` — never read `senders.app_password` raw.
+- Gmail app passwords are stored encrypted (AES-GCM, key derived from `ENCRYPTION_KEY`, falling back to `SESSION_SECRET` if unset); always go through `crypto.ts` — never read `senders.app_password` raw.
 - Times are stored UTC; scheduling windows are evaluated in the campaign's `timezone` via `src/lib/time.ts`. Don't `new Date()`-compare hours directly.

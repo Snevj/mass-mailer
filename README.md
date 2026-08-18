@@ -94,7 +94,8 @@ Then fill in `.env.local`:
 | `GMAIL_FROM_NAME` | Display name (e.g. `Jane Doe`) |
 | `APP_PASSWORD` | Anything you want — this is the login password for the Mailvia UI |
 | `SESSION_SECRET` | Run `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` → paste output |
-| `CRON_SECRET` | Same as above — different random hex string |
+| `ENCRYPTION_KEY` | Same command, a different string. Encrypts stored sender app-passwords — kept separate from `SESSION_SECRET` so rotating one doesn't break the other. Optional (falls back to `SESSION_SECRET`), but set it explicitly for new installs. |
+| `CRON_SECRET` | Same command, a different random hex string |
 | `APP_URL` | `http://localhost:3000` for local dev. Change to your Vercel URL in production. |
 
 ### 6. Run locally
@@ -190,6 +191,22 @@ update public.cron_config set value = 'new-random-string' where key = 'cron_secr
 
 ---
 
+## Resetting the login password
+
+Mailvia has one shared login password, not per-user accounts — there's no email-based "forgot password" flow. Two ways it's actually stored, checked in this order (`src/lib/auth.ts`):
+
+1. **A custom password**, if one was ever set via **Settings → Change password** in the app. This is hashed (scrypt) and stored in Supabase, table `app_settings`, row `key = 'app_password_hash'`. If this row exists, it **always wins** — changing `APP_PASSWORD` on Vercel does nothing while it's there.
+2. **The `APP_PASSWORD` env var**, used only as a fallback when no custom password has been set (or after deleting that row).
+
+**If you're locked out:**
+
+1. In the Supabase dashboard → **Table Editor** → `app_settings`, delete the row where `key = 'app_password_hash'` (if present). This forces the app back to checking `APP_PASSWORD`.
+2. In Vercel → your project → **Settings → Environment Variables**, set `APP_PASSWORD` to a new value you'll remember. Note: Vercel treats it as write-only once saved as "Sensitive" — you can't view the old value, only overwrite it.
+3. Go to **Deployments** → the latest deployment's `···` menu → **Redeploy**. Env var changes only take effect on a fresh deployment.
+4. Log in with the new password. Optionally set a memorable one via **Settings → Change password** afterward — just know that from then on, resetting it again means repeating step 1 first.
+
+---
+
 ## Troubleshooting
 
 **Nothing sending — campaign stuck at "running"**
@@ -252,10 +269,11 @@ supabase/
 ## Security notes
 
 - The server uses `SUPABASE_SERVICE_ROLE_KEY`, which bypasses RLS. RLS is still enabled on every table as defense-in-depth.
-- Gmail app passwords are encrypted with AES-GCM using a key derived from `SESSION_SECRET`. Never commit `.env.local`.
+- Gmail app passwords are encrypted with AES-GCM using a key derived from `ENCRYPTION_KEY` (falls back to `SESSION_SECRET` if unset — set it explicitly for new installs so rotating one doesn't break the other). Never commit `.env.local`.
 - HMAC-signed tokens (unsubscribe, tracking pixel, click redirect) prevent tampering.
 - The cron endpoint uses constant-time secret comparison (`crypto.timingSafeEqual`).
 - `APP_PASSWORD` is for the single UI login — pick something strong.
+- Login attempts are rate-limited per IP (5 failures locks that IP out for 15 minutes) via the `login_attempts` table. **Existing installs must re-run `supabase/schema.sql`** (it's idempotent — safe to paste and run again) to create this table; without it, login just silently has no rate limiting rather than failing.
 
 ---
 

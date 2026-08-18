@@ -20,7 +20,9 @@ const Schema = z.object({
 });
 
 const MAX_ATTACHMENTS = 5;
-const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20 MB per file
+// Pending files here arrive as a raw multipart body, subject to Vercel's
+// 4.5MB serverless request-body cap regardless of app code.
+const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024; // 4 MB per file
 
 type Attachment = { filename: string; content: Buffer };
 
@@ -76,7 +78,7 @@ export async function POST(req: NextRequest) {
 
   for (const f of pendingFiles) {
     if (f.size > MAX_ATTACHMENT_BYTES) {
-      return NextResponse.json({ error: `"${f.name}" exceeds 20MB limit.` }, { status: 413 });
+      return NextResponse.json({ error: `"${f.name}" exceeds 4MB limit.` }, { status: 413 });
     }
     const ab = await f.arrayBuffer();
     attachments.push({ filename: f.name, content: Buffer.from(ab) });
@@ -108,9 +110,8 @@ export async function POST(req: NextRequest) {
 
   const vars = parsed.data.vars ?? { Name: "Test", Company: "Your Company" };
   const subject = `[TEST] ${render(parsed.data.subject, vars)}`;
-  const rendered = render(parsed.data.template, vars);
-  const html = toHtml(rendered);
-  const text = toPlain(rendered);
+  const html = toHtml(render(parsed.data.template, vars, { escapeForHtml: true }));
+  const text = toPlain(render(parsed.data.template, vars));
 
   try {
     const messageId = await sendMail({

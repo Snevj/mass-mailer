@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
+import { useConfirm } from "@/components/useConfirm";
 
 type CampaignRow = {
   id: string;
@@ -41,14 +43,25 @@ function relative(dt: string) {
 }
 
 export default function Home() {
+  const router = useRouter();
   const [rows, setRows] = useState<CampaignRow[] | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [filter, setFilter] = useState<"all" | "running" | "draft" | "done">("all");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   async function load() {
-    const r = await fetch(`/api/campaigns${showArchived ? "?archived=1" : ""}`, { cache: "no-store" });
-    const data = await r.json();
-    setRows(data.campaigns ?? []);
+    try {
+      const r = await fetch(`/api/campaigns${showArchived ? "?archived=1" : ""}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      setRows(data.campaigns ?? []);
+      setLoadErr(null);
+    } catch {
+      setLoadErr("Couldn't load campaigns.");
+    }
   }
 
   useEffect(() => {
@@ -59,6 +72,39 @@ export default function Home() {
   }, [showArchived]);
 
   const filtered = (rows ?? []).filter((r) => filter === "all" || r.status === filter);
+
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    setSelected((prev) =>
+      prev.size === filtered.length ? new Set() : new Set(filtered.map((c) => c.id))
+    );
+  }
+
+  async function bulkDelete() {
+    const n = selected.size;
+    const ok = await confirm({
+      title: `Delete ${n} campaign${n === 1 ? "" : "s"}?`,
+      description: "This permanently deletes the selected campaigns and all of their recipients. This cannot be undone.",
+      danger: true,
+      confirmLabel: `Delete ${n}`,
+    });
+    if (!ok) return;
+    setBulkDeleting(true);
+    try {
+      await Promise.all(Array.from(selected).map((id) => fetch(`/api/campaigns/${id}`, { method: "DELETE" })));
+      setSelected(new Set());
+      load();
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
 
   return (
     <AppShell>
@@ -104,7 +150,26 @@ export default function Home() {
           ))}
         </div>
 
-        {rows === null && (
+        {selected.size > 0 && (
+          <div className="flex items-center justify-between gap-3 bg-surface border border-ink-200 text-[13px] px-4 py-2.5 rounded-md mb-4">
+            <span>{selected.size} selected</span>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setSelected(new Set())} className="btn-quiet text-[12px]">Clear</button>
+              <button onClick={bulkDelete} disabled={bulkDeleting} className="btn-danger text-[12px]">
+                {bulkDeleting ? "Deleting…" : "Delete selected"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {loadErr && (
+          <div className="flex items-center justify-between gap-3 bg-red-50 text-red-700 text-[13px] px-3 py-2 rounded-md mb-4">
+            <span>{loadErr}</span>
+            <button onClick={() => load()} className="btn-quiet text-[12px] shrink-0">Retry</button>
+          </div>
+        )}
+
+        {rows === null && !loadErr && (
           <div className="text-[13px] text-ink-500 py-8">Loading…</div>
         )}
 
@@ -126,7 +191,14 @@ export default function Home() {
         {filtered.length > 0 && (
           <div className="sheet overflow-hidden">
             {/* desktop table header */}
-            <div className="hidden md:grid grid-cols-[1fr,auto,120px,100px] gap-4 px-4 py-2.5 border-b border-ink-200 text-[12px] font-medium text-ink-500">
+            <div className="hidden md:grid grid-cols-[24px,1fr,auto,120px,100px] gap-4 px-4 py-2.5 border-b border-ink-200 text-[12px] font-medium text-ink-500 items-center">
+              <input
+                type="checkbox"
+                className="accent-ink"
+                checked={selected.size > 0 && selected.size === filtered.length}
+                onChange={toggleAll}
+                aria-label="Select all"
+              />
               <span>Name</span>
               <span className="text-right">Progress</span>
               <span>Status</span>
@@ -135,14 +207,34 @@ export default function Home() {
             {filtered.map((c) => {
               const pct = c.total ? Math.round((c.sent / c.total) * 100) : 0;
               return (
-                <Link
+                <div
                   key={c.id}
-                  href={`/campaigns/${c.id}`}
-                  className="block md:grid md:grid-cols-[1fr,auto,120px,100px] md:gap-4 px-4 py-3 border-b border-ink-100 last:border-b-0 hover:bg-hover transition-colors"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => router.push(`/campaigns/${c.id}`)}
+                  onKeyDown={(e) => { if (e.key === "Enter") router.push(`/campaigns/${c.id}`); }}
+                  className="block md:grid md:grid-cols-[24px,1fr,auto,120px,100px] md:gap-4 md:items-center px-4 py-3 border-b border-ink-100 last:border-b-0 hover:bg-hover transition-colors cursor-pointer"
                 >
+                  <div className="hidden md:block" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      className="accent-ink"
+                      checked={selected.has(c.id)}
+                      onChange={() => toggleOne(c.id)}
+                      aria-label={`Select ${c.name}`}
+                    />
+                  </div>
                   {/* mobile: stacked; desktop: first column */}
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 md:block">
+                      <input
+                        type="checkbox"
+                        className="accent-ink md:hidden shrink-0"
+                        checked={selected.has(c.id)}
+                        onChange={() => toggleOne(c.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        aria-label={`Select ${c.name}`}
+                      />
                       <div className="text-[14px] font-medium text-ink truncate flex-1 md:flex-initial">{c.name}</div>
                       <span className="md:hidden shrink-0">{statusPill(c.status)}</span>
                     </div>
@@ -170,11 +262,12 @@ export default function Home() {
                   </div>
                   <div className="hidden md:flex items-center">{statusPill(c.status)}</div>
                   <div className="hidden md:block text-[12px] text-ink-500 text-right">{relative(c.updated_at)}</div>
-                </Link>
+                </div>
               );
             })}
           </div>
         )}
+        {ConfirmDialog}
       </div>
     </AppShell>
   );

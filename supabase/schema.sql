@@ -224,6 +224,14 @@ create table if not exists app_settings (
 insert into app_settings (key, value) values ('reply_check_enabled', 'false')
 on conflict (key) do nothing;
 
+-- Login rate limiting — one row per client IP. See src/app/api/auth/login/route.ts.
+create table if not exists login_attempts (
+  ip           text primary key,
+  fail_count   int not null default 0,
+  locked_until timestamptz,
+  updated_at   timestamptz not null default now()
+);
+
 -- ----- Row-Level Security: default-deny for anon / authenticated roles.
 -- The server uses SUPABASE_SERVICE_ROLE_KEY, which bypasses RLS, so this
 -- doesn't change app behavior. It's defense-in-depth against accidental
@@ -235,5 +243,6 @@ alter table follow_up_steps    enable row level security;
 alter table send_log           enable row level security;
 alter table tracking_events    enable row level security;
 alter table unsubscribes       enable row level security;
+alter table login_attempts     enable row level security;
 alter table replies            enable row level security;
 alter table app_settings       enable row level security;

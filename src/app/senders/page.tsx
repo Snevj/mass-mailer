@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
+import { useConfirm } from "@/components/useConfirm";
 
 type Provider = "gmail" | "outlook" | "microsoft_graph";
 
@@ -35,6 +36,8 @@ export default function SendersPage() {
   const [err, setErr] = useState<string | null>(null);
   const [form, setForm] = useState({ label: "", email: "", provider: "gmail" as Provider, app_password: "", ms_tenant_id: "", ms_client_id: "", from_name: "", is_default: false, warmup_enabled: false });
   const [saving, setSaving] = useState(false);
+  const [showSecret, setShowSecret] = useState(false);
+  const { confirm, ConfirmDialog } = useConfirm();
 
   async function load() {
     const r = await fetch("/api/senders", { cache: "no-store" });
@@ -84,8 +87,14 @@ export default function SendersPage() {
     await load();
   }
 
-  async function remove(id: string) {
-    if (!confirm("Delete this sender? Campaigns using it will fall back to the env-var Gmail.")) return;
+  async function remove(id: string, label: string) {
+    const ok = await confirm({
+      title: "Delete this sender?",
+      description: `"${label}" will be removed. Campaigns using it will fall back to the env-var Gmail sender.`,
+      danger: true,
+      confirmLabel: "Delete sender",
+    });
+    if (!ok) return;
     await fetch(`/api/senders/${id}`, { method: "DELETE" });
     await load();
   }
@@ -201,7 +210,20 @@ export default function SendersPage() {
               {form.provider !== "microsoft_graph" && (
                 <div>
                   <label className="label-cap">App password</label>
-                  <input className="field-boxed font-mono" placeholder="xxxx xxxx xxxx xxxx" value={form.app_password} onChange={(e) => setForm({ ...form, app_password: e.target.value })} required />
+                  <div className="flex gap-2">
+                    <input
+                      className="field-boxed font-mono flex-1"
+                      type={showSecret ? "text" : "password"}
+                      autoComplete="new-password"
+                      placeholder="xxxx xxxx xxxx xxxx"
+                      value={form.app_password}
+                      onChange={(e) => setForm({ ...form, app_password: e.target.value })}
+                      required
+                    />
+                    <button type="button" onClick={() => setShowSecret((v) => !v)} className="btn-ghost text-[12px] shrink-0">
+                      {showSecret ? "Hide" : "Show"}
+                    </button>
+                  </div>
                   <p className="text-[11px] text-ink-500 mt-1.5">
                     {form.provider === "gmail"
                       ? "16 lowercase letters Google generates — not your login password."
@@ -222,7 +244,20 @@ export default function SendersPage() {
                   </div>
                   <div className="md:col-span-2">
                     <label className="label-cap">Client secret</label>
-                    <input className="field-boxed font-mono" placeholder="Secret Value from Certificates & secrets" value={form.app_password} onChange={(e) => setForm({ ...form, app_password: e.target.value })} required />
+                    <div className="flex gap-2">
+                      <input
+                        className="field-boxed font-mono flex-1"
+                        type={showSecret ? "text" : "password"}
+                        autoComplete="new-password"
+                        placeholder="Secret Value from Certificates & secrets"
+                        value={form.app_password}
+                        onChange={(e) => setForm({ ...form, app_password: e.target.value })}
+                        required
+                      />
+                      <button type="button" onClick={() => setShowSecret((v) => !v)} className="btn-ghost text-[12px] shrink-0">
+                        {showSecret ? "Hide" : "Show"}
+                      </button>
+                    </div>
                     <p className="text-[11px] text-ink-500 mt-1.5">Paste the secret <b>Value</b> (not the Secret ID). Shown only once when IT creates it.</p>
                   </div>
                 </>
@@ -326,7 +361,7 @@ export default function SendersPage() {
                     <div className="flex items-center gap-1">
                       <button className="btn-quiet text-[12px]" onClick={() => startEdit(s)}>Edit</button>
                       {!s.is_default && <button className="btn-quiet text-[12px]" onClick={() => setDefault(s.id)}>Set default</button>}
-                      <button className="btn-quiet text-[12px] text-red-600 hover:bg-red-50 hover:text-red-700" onClick={() => remove(s.id)}>Delete</button>
+                      <button className="btn-quiet text-[12px] text-red-600 hover:bg-red-50 hover:text-red-700" onClick={() => remove(s.id, s.label)}>Delete</button>
                     </div>
                   </div>
                 )}
@@ -335,6 +370,7 @@ export default function SendersPage() {
           </div>
         )}
       </div>
+      {ConfirmDialog}
     </AppShell>
   );
 }
